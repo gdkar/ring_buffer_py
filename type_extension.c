@@ -1,7 +1,8 @@
 #include <Python.h>
 #include <structmember.h>
 #include "src/buffer.h"
-
+#define MIN(a,b) ((a)<(b)?(a):(b))
+#define MAX(a,b) ((a)>(b)?(a):(b))
 static PyObject *InsufficientDataError;
 static PyObject *FullError;
 
@@ -14,157 +15,102 @@ typedef struct {
 } Buffer;
 
 static void
-Buffer_dealloc(Buffer* self)
-{
+Buffer_dealloc(Buffer* self){
     ring_buffer_free (self->buffer);
     self->ob_type->tp_free ((PyObject*) self);
 }
 
 static PyObject *
-Buffer_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
-{
+Buffer_new(PyTypeObject *type, PyObject *args, PyObject *kwargs){
     Buffer* self;
     self = (Buffer*)type->tp_alloc(type, 0);
-
     return (PyObject *)self;
 }
 
 static int
-Buffer_init(Buffer *self, PyObject *args, PyObject *kwargs)
-{
+Buffer_init(Buffer *self, PyObject *args, PyObject *kwargs){
     static char *kwlist[] = {"order", NULL};
-
-    if ( !PyArg_ParseTupleAndKeywords(args, kwargs, "|i", kwlist, &self->order) ) {
-        return -1;
-    }
-
-    if (self->order == 0) {
+    if ( !PyArg_ParseTupleAndKeywords(args, kwargs, "|i", kwlist, &self->order) ) {return -1;}
+    if (self->order < 12) {
         self->order = 12; // the ring buffer size defaults to 4KB
     }
-
-    if (self->order < 12) {
-        PyErr_SetString (PyExc_ValueError, "Order is too small, which has to be at least 12");
-        return NULL;
-    }
-
     self->buffer = malloc(sizeof *self->buffer);
     ring_buffer_create (self->buffer, self->order);
-
     return 0;
 }
-
 static PyObject *
-Buffer_write(Buffer *self, PyObject *args, PyObject *kwargs)
-{
+Buffer_write(Buffer *self, PyObject *args, PyObject *kwargs){
     char *data;
     int count_bytes;
     static char *kwlist[] = {"data", NULL};
-
     if (!PyArg_ParseTupleAndKeywords(args, kwargs, "s#", kwlist, &data, &count_bytes))
-        return NULL;
-
+        return PyLong_FromSsize_t(0);
     if (self->closed) {
         PyErr_SetString (PyExc_ValueError, "I/O operation on closed file");
-        return NULL;
+        return PyLong_FromSsize_t(0);
     }
-    int available_bytes = ring_buffer_count_free_bytes (self->buffer);
-    if (available_bytes < count_bytes) {
-        PyErr_SetString(FullError, "Not enough free bytes to write");
-        return NULL;
-    }
-
-    ring_buffer_write (self->buffer, data, count_bytes);
-
-    return Py_None;
+    return PyLong_FromSsize_t(ring_buffer_write (self->buffer, data, count_bytes));
 }
 
 static PyObject * 
-Buffer_close(Buffer *self, PyObject *args, PyObject *kwargs)
-{
+Buffer_close(Buffer *self, PyObject *args, PyObject *kwargs){
     ring_buffer_write_close (self->buffer);
     self->closed = 1;
-
     return Py_None;
 }
 
 static PyObject *
-Buffer_eof(Buffer *self, PyObject *args, PyObject *kwargs)
-{
-    if ( self->closed && ring_buffer_eof(self->buffer) )
-        return Py_True;
+Buffer_eof(Buffer *self, PyObject *args, PyObject *kwargs){
+    if ( self->closed && ring_buffer_eof(self->buffer) ) return Py_True;
     return Py_False;
 }
 
 static PyObject *
-Buffer_read(Buffer *self, PyObject *args, PyObject *kwargs)
-{
-    int count_bytes;
+Buffer_read(Buffer *self, PyObject *args, PyObject *kwargs){
+    ssize_t count_bytes;
     char *kwlist[] = {"length", NULL};
-
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "i", kwlist, &count_bytes))
-        return NULL;
-
-    int bytes_available_for_read = ring_buffer_count_bytes (self->buffer);
-    if (bytes_available_for_read < count_bytes) {
-        PyErr_SetString(InsufficientDataError, "Not enough data to read from");
-        return NULL;
-    }
-
+    if (PyArg_ParseTupleAndKeywords(args, kwargs, "l", kwlist, &count_bytes))
+      count_bytes = MIN(ring_buffer_count_bytes (self->buffer),count_bytes);
+    else
+        count_bytes = ring_buffer_count_bytes(self->buffer);
     PyObject *datagram = PyString_FromStringAndSize(NULL, count_bytes);
     ring_buffer_read (self->buffer, PyString_AsString(datagram), count_bytes);
     return datagram;
 }
-
 static PyObject *
-Buffer_peek_read(Buffer *self, PyObject *args, PyObject *kwargs)
-{
-    int count_bytes;
+Buffer_peek_read(Buffer *self, PyObject *args, PyObject *kwargs){
+    ssize_t count_bytes;
     char *kwlist[] = {"length", NULL};
-
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "i", kwlist, &count_bytes))
-        return NULL;
-
-    int bytes_available_for_read = ring_buffer_count_bytes (self->buffer);
-    if (bytes_available_for_read < count_bytes) {
-        PyErr_SetString (InsufficientDataError, "Not enough data to read from");
-        return NULL;
-    }
-
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "l", kwlist, &count_bytes))
+        count_bytes = ring_buffer_count_bytes(self->buffer);
     PyObject *datagram = PyString_FromStringAndSize(NULL, count_bytes);
-    ring_buffer_peek (self->buffer, PyString_AsString(datagram), count_bytes);
-
+    ring_buffer_peek(self->buffer, PyString_AsString(datagram), count_bytes);
     return datagram;
 }
-
 static PyObject *
-Buffer_read_piece(Buffer *self, PyObject *args, PyObject *kwargs)
-{
+Buffer_read_piece(Buffer *self, PyObject *args, PyObject *kwargs){
     if ( ring_buffer_eof(self->buffer) ) {
         PyErr_SetString (InsufficientDataError, "No data in buffer");
         return NULL;
     }
-
-    int bytes_available_for_read = ring_buffer_count_bytes (self->buffer);
+    ssize_t bytes_available_for_read = ring_buffer_count_bytes (self->buffer);
     PyObject *datagram;
     if (bytes_available_for_read < self->buffer->page_size) {
         datagram = PyString_FromStringAndSize(NULL, bytes_available_for_read);
         ring_buffer_read (self->buffer, PyString_AsString(datagram), bytes_available_for_read);
     } else {
         datagram = PyString_FromStringAndSize(NULL, self->buffer->page_size);
-        ring_buffer_read (self->buffer, PyString_AsString(datagram), bytes_available_for_read);
+        ring_buffer_read (self->buffer, PyString_AsString(datagram), self->buffer->page_size);
     }
-
     return datagram;
 }
-
 static Py_ssize_t
 Buffer_len(Buffer* self)
-{
-    return ring_buffer_count_bytes (self->buffer);
-}
+{return ring_buffer_count_bytes (self->buffer);}
 
 static PySequenceMethods Buffer_sequence_methods = {
-    Buffer_len     /* sq_length */
+    Buffer_len     /* sq_length */,
+    {NULL}
 };
 
 static PyMemberDef Buffer_members[] = {

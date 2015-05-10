@@ -7,7 +7,7 @@ from distutils.core import Extension
 buffer_m = Extension('ring_buffer',
                      sources = ['type_extension.c', 'src/buffer.c'],
                      include_dirs = ['src/'],
-                     extra_compile_args = ['-g'],
+                     extra_compile_args = ['-g','-std=gnu11'],
                     )
 
 setup(name = 'ring_buffer',
